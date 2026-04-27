@@ -1,81 +1,191 @@
-// ============================================
-// GLOBAL STATE
-// ============================================
+/**
+ * ==========================================
+ * GAME LOGIC — GUESS WHO AI BOARD GAME
+ * ==========================================
+ */
+
+'use strict';
+
+// ==========================================
+// 1. GLOBAL STATE
+// ==========================================
+
 const STATE = {
-  mode: null,               // 1 = you vs AI, 2 = AI guesses
-  selectedChar: null,       // player's character id
-  selectedColor: 'blue',
-  selectedAlgo: null,
-  gameActive: false,
+  mode:          null,    
+  selectedChar:  null,    
+  selectedColor: 'blue',  
+  selectedAlgo:  null,    
+  gameActive:    false,
 
-  // Mode 1 specific
-  playerCandidates: [],
-  aiCandidates: [],
-  playerHistory: [],
-  aiHistory: [],
-  currentTurn: 'ai',        // 'ai' or 'player'
-  guessMode: false,
-  aiSelectedChar: null,     // AI's hidden character (object)
+  // ── Mode 1 ──
+  playerCandidates: [],   
+  aiCandidates:     [],   
+  playerHistory:    [],   
+  aiHistory:        [],
+  currentTurn:      'ai', 
+  guessMode:        false,
+  aiSelectedChar:   null, 
 
-  // Mode 2 specific
-  algoState: null,
+  // ── Timer ──
+  timerInterval:  null,
+  timeRemaining:  30,
+
+  // ── Scoring ──
+  playerScore:  0,
+  guessesLeft:  3,
+
+  // ── Mode 2 ──
   autoRunInterval: null,
 
-  // Metrics
   metrics: {
     startTime: 0,
-    questions: 0,
-    nodes: 0
+    questions:  0,
+    nodes:      0
   }
 };
 
-// ============================================
-// UTILITIES
-// ============================================
-function charAvatarHTML(char, size = 'normal') {
-  const sizeClass = size === 'large' ? 'avatar-large' : 'avatar-normal';
-  return `
-    <div class="char-avatar-wrap ${sizeClass}">
-      <img src="${char.image}" alt="${char.name}" class="char-img"
-           onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-      <span class="char-emoji-fallback" style="display:none">${char.emoji}</span>
-    </div>
-  `;
+// ==========================================
+// 2. SAVE / LOAD
+// ==========================================
+
+function saveGame() {
+  if (!STATE.gameActive) {
+    showToast('⚠️ No active game to save!');
+    return;
+  }
+  const saveData = {
+    mode:              STATE.mode,
+    selectedChar:      STATE.selectedChar,
+    selectedColor:     STATE.selectedColor,
+    selectedAlgo:      STATE.selectedAlgo,
+    playerCandidates:  STATE.playerCandidates.map(c => c.id),
+    aiCandidates:      STATE.aiCandidates.map(c => c.id),
+    playerHistory:     STATE.playerHistory,
+    aiHistory:         STATE.aiHistory,
+    currentTurn:       STATE.currentTurn,
+    playerScore:       STATE.playerScore,
+    guessesLeft:       STATE.guessesLeft,
+    metrics:           STATE.metrics,
+    aiSelectedCharId:  STATE.aiSelectedChar ? STATE.aiSelectedChar.id : null,
+    difficulty:        currentDifficulty
+  };
+  try {
+    localStorage.setItem('guessWhoSave', JSON.stringify(saveData));
+    showToast('💾 Game saved successfully!');
+  } catch (_) {
+    showToast('❌ Could not save game (storage full?).');
+  }
 }
+
+function loadGame() {
+  let data;
+  try {
+    const raw = localStorage.getItem('guessWhoSave');
+    if (!raw) { showToast('📂 No saved game found!'); return; }
+    data = JSON.parse(raw);
+  } catch (_) {
+    showToast('❌ Save data is corrupt.');
+    return;
+  }
+
+  if (data.difficulty) setDifficulty(data.difficulty);
+
+  STATE.mode             = data.mode;
+  STATE.selectedChar     = data.selectedChar;
+  STATE.selectedColor    = data.selectedColor;
+  STATE.selectedAlgo     = data.selectedAlgo;
+  STATE.playerCandidates = data.playerCandidates.map(id => getCharacterById(id)).filter(Boolean);
+  STATE.aiCandidates     = data.aiCandidates.map(id => getCharacterById(id)).filter(Boolean);
+  STATE.playerHistory    = data.playerHistory   || [];
+  STATE.aiHistory        = data.aiHistory       || [];
+  STATE.currentTurn      = data.currentTurn     || 'ai';
+  STATE.playerScore      = data.playerScore     || 0;
+  STATE.guessesLeft      = data.guessesLeft     || 3;
+  STATE.metrics          = data.metrics         || { startTime: Date.now(), questions: 0, nodes: 0 };
+  STATE.aiSelectedChar   = data.aiSelectedCharId ? getCharacterById(data.aiSelectedCharId) : null;
+  STATE.gameActive       = true;
+
+  if (STATE.mode === 1) {
+    goToPage('page-game1');
+    buildBoardGrid('aiBoardGrid',    true);
+    buildBoardGrid('playerBoardGrid', false);
+
+    const playerIds = new Set(STATE.playerCandidates.map(c => c.id));
+    CHARACTERS.forEach(char => {
+      if (!playerIds.has(char.id)) {
+        const el = document.getElementById(`playerBoardGrid-card-${char.id}`);
+        if (el) { el.classList.add('eliminated'); el.style.opacity = '0.15'; }
+      }
+    });
+
+    updateAIBoardFiltered();
+
+    const playerChar = getCharacterById(STATE.selectedChar);
+    if (playerChar) {
+      document.getElementById('playerCharCard').innerHTML =
+        `${charAvatar(playerChar, true)}<div class="sc-name">${playerChar.name}</div>`;
+    }
+
+    STATE.aiHistory.forEach(h => _addHistoryItem('aiHistory', h.question, h.answer));
+    STATE.playerHistory.forEach(h => _addHistoryItem('playerHistory', h.question, h.answer));
+
+    updateCandidateCounts1();
+    updateScoreDisplay();
+    resetGuessBadge();
+    applyColorTheme(STATE.selectedColor);
+    setTurn(STATE.currentTurn);
+
+    showToast('📂 Game loaded!');
+  } else {
+    showToast('📂 Mode 2 save cannot be resumed — please start a new game.');
+    STATE.gameActive = false;
+  }
+}
+
+// ==========================================
+// 3. NAVIGATION
+// ==========================================
 
 function goToPage(id) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
+  const page = document.getElementById(id);
+  if (page) page.classList.add('active');
 }
 
 function openModal(id) {
-  const m = document.getElementById(id);
-  m.classList.add('open');
-  gsap.fromTo(m.querySelector('.modal-box'),
-    { scale: 0.85, opacity: 0 },
-    { scale: 1, opacity: 1, duration: 0.3 }
-  );
+  const modal = document.getElementById(id);
+  if (!modal) return;
+  modal.classList.add('open');
+  const box = modal.querySelector('.modal-box');
+  if (box && typeof gsap !== 'undefined') {
+    gsap.fromTo(box, { scale: 0.85, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.28 });
+  }
 }
 
 function closeModal(id) {
-  const m = document.getElementById(id);
-  gsap.to(m.querySelector('.modal-box'), {
-    scale: 0.9,
-    opacity: 0,
-    duration: 0.2,
-    onComplete: () => m.classList.remove('open')
-  });
+  const modal = document.getElementById(id);
+  if (!modal) return;
+  const box = modal.querySelector('.modal-box');
+  if (box && typeof gsap !== 'undefined') {
+    gsap.to(box, { scale: 0.9, opacity: 0, duration: 0.18,
+      onComplete: () => modal.classList.remove('open') });
+  } else {
+    modal.classList.remove('open');
+  }
 }
 
 function confirmQuit() {
+  stopTimer();
+  stopAutoRun();
   openModal('quitModal');
 }
 
 function doQuit() {
   STATE.gameActive = false;
-  if (STATE.autoRunInterval) clearInterval(STATE.autoRunInterval);
+  stopTimer();
+  stopAutoRun();
   closeModal('quitModal');
-  goToPage('page-home');
+  setTimeout(() => goToPage('page-home'), 250);
 }
 
 function playAgain() {
@@ -83,13 +193,36 @@ function playAgain() {
   goToSelectMode(STATE.mode);
 }
 
-// ============================================
-// MODE SELECTION & CHARACTER SELECTION
-// ============================================
+function showToast(message) {
+  const toast = document.getElementById('gameToast');
+  if (!toast) return;
+  toast.textContent = message;
+  toast.style.display = 'block';
+  if (typeof gsap !== 'undefined') {
+    gsap.killTweensOf(toast);
+    gsap.fromTo(toast, { opacity: 0, y: 20 }, {
+      opacity: 1, y: 0, duration: 0.3, ease: 'back.out(1.4)',
+      onComplete: () => {
+        gsap.to(toast, { opacity: 0, y: 20, duration: 0.4, delay: 2.5,
+          onComplete: () => { toast.style.display = 'none'; }
+        });
+      }
+    });
+  } else {
+
+    toast.style.opacity = '1';
+    setTimeout(() => { toast.style.opacity = '0'; }, 3000);
+  }
+}
+
+// ==========================================
+// 4. SELECTION SCREEN
+// ==========================================
+
 function goToSelectMode(mode) {
-  STATE.mode = mode;
-  STATE.selectedChar = null;
-  STATE.selectedAlgo = null;
+  STATE.mode          = mode;
+  STATE.selectedChar  = null;
+  STATE.selectedAlgo  = null;
   STATE.selectedColor = 'blue';
   buildSelectionGrid();
   goToPage('page-select');
@@ -97,30 +230,27 @@ function goToSelectMode(mode) {
 
 function buildSelectionGrid() {
   const grid = document.getElementById('selectionGrid');
+  if (!grid) return;
   grid.innerHTML = '';
+
   CHARACTERS.forEach(char => {
     const card = document.createElement('div');
     card.className = 'char-card';
     card.id = `sel-card-${char.id}`;
-    card.innerHTML = `
-      <div class="char-avatar" style="background:${charBgColor(char)}">
-        ${charAvatarHTML(char)}
-      </div>
-      <div class="char-name">${char.name}</div>
-    `;
+    card.innerHTML = `${charAvatar(char, false)}<div class="char-name">${char.name}</div>`;
     card.onclick = () => selectCharacter(char.id);
     grid.appendChild(card);
   });
 
   const algoSection = document.getElementById('algoSection');
-  algoSection.style.display = STATE.mode === 2 ? 'block' : 'none';
-  if (STATE.mode === 2) buildAlgoSelector();
+  if (algoSection) {
+    algoSection.style.display = (STATE.mode === 2) ? 'block' : 'none';
+    if (STATE.mode === 2) buildAlgoSelector();
+  }
 
   const startBtn = document.getElementById('startGameBtn');
-  startBtn.disabled = true;
-  startBtn.style.opacity = '0.4';
+  if (startBtn) { startBtn.disabled = true; startBtn.style.opacity = '0.4'; }
 
-  // Reset color buttons
   document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
   const blueBtn = document.querySelector('.color-btn.blue');
   if (blueBtn) blueBtn.classList.add('active');
@@ -128,16 +258,19 @@ function buildSelectionGrid() {
 
 function buildAlgoSelector() {
   const container = document.getElementById('algoSelector');
+  if (!container) return;
   container.innerHTML = '';
+
   ALGORITHMS.forEach(algo => {
     const btn = document.createElement('button');
     btn.className = 'algo-btn';
-    btn.dataset.id = algo.id;
     btn.innerHTML = `<span style="color:${algo.color}">●</span> ${algo.name}`;
+    btn.title = algo.label;
     btn.onclick = () => {
       document.querySelectorAll('.algo-btn').forEach(b => b.classList.remove('selected'));
       btn.classList.add('selected');
       STATE.selectedAlgo = algo.id;
+      initAlgorithmState(algo.id);
       checkSelectionReady();
     };
     container.appendChild(btn);
@@ -147,39 +280,48 @@ function buildAlgoSelector() {
 function selectColor(color) {
   STATE.selectedColor = color;
   document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
-  const activeBtn = document.querySelector(`.color-btn.${color}`);
-  if (activeBtn) activeBtn.classList.add('active');
+  const btn = document.querySelector(`.color-btn.${color}`);
+  if (btn) btn.classList.add('active');
 
-  // Re-apply selection highlight with new color
-  if (STATE.selectedChar) {
-    document.querySelectorAll('.char-card').forEach(c => {
-      c.classList.remove('selected-blue', 'selected-red');
-    });
+  if (STATE.selectedChar !== null) {
+    document.querySelectorAll('.char-card').forEach(c =>
+      c.classList.remove('selected-blue', 'selected-red'));
     const card = document.getElementById(`sel-card-${STATE.selectedChar}`);
     if (card) card.classList.add(`selected-${color}`);
   }
 }
 
 function selectCharacter(id) {
-  document.querySelectorAll('.char-card').forEach(c => {
-    c.classList.remove('selected-blue', 'selected-red');
-  });
+  document.querySelectorAll('.char-card').forEach(c =>
+    c.classList.remove('selected-blue', 'selected-red'));
   STATE.selectedChar = id;
   const card = document.getElementById(`sel-card-${id}`);
-  card.classList.add(`selected-${STATE.selectedColor}`);
+  if (card) card.classList.add(`selected-${STATE.selectedColor}`);
   checkSelectionReady();
 }
 
 function checkSelectionReady() {
-  const ready = STATE.selectedChar !== null && (STATE.mode === 1 || STATE.selectedAlgo !== null);
+  const ready = STATE.mode === 1
+    ? STATE.selectedChar !== null
+    : STATE.selectedChar !== null && STATE.selectedAlgo !== null;
+
   const btn = document.getElementById('startGameBtn');
-  btn.disabled = !ready;
-  btn.style.opacity = ready ? '1' : '0.4';
+  if (btn) { btn.disabled = !ready; btn.style.opacity = ready ? '1' : '0.4'; }
 }
 
+// ==========================================
+// 5. GAME START
+// ==========================================
+
 function startGame() {
-  if (!STATE.selectedChar) return;
-  STATE.gameActive = true;
+  if (STATE.mode === 1 && STATE.selectedChar === null) return;
+  if (STATE.mode === 2 && (STATE.selectedChar === null || STATE.selectedAlgo === null)) return;
+
+  STATE.gameActive  = true;
+  STATE.playerScore = 0;
+  STATE.guessesLeft = 3;
+  STATE.metrics     = { startTime: Date.now(), questions: 0, nodes: 0 };
+
   if (STATE.mode === 1) {
     initMode1();
     goToPage('page-game1');
@@ -189,240 +331,266 @@ function startGame() {
   }
 }
 
-// ============================================
-// MODE 1 : YOU VS AI
-// ============================================
-function initMode1() {
-  // Reset state
-  STATE.playerCandidates = [...CHARACTERS];
-  STATE.aiCandidates = [...CHARACTERS];
-  STATE.playerHistory = [];
-  STATE.aiHistory = [];
-  STATE.currentTurn = 'ai';
-  STATE.guessMode = false;
-  STATE.metrics = {
-    startTime: Date.now(),
-    questions: 0,
-    nodes: 0
-  };
+// ==========================================
+// 6. TIMER
+// ==========================================
 
-  // AI picks a random character (different from player)
+function startPlayerTimer() {
+  stopTimer();
+  STATE.timeRemaining = 30;
+  _updateTimerDisplay();
+
+  STATE.timerInterval = setInterval(() => {
+    if (!STATE.gameActive || STATE.currentTurn !== 'player') {
+      stopTimer();
+      return;
+    }
+    STATE.timeRemaining--;
+    _updateTimerDisplay();
+
+    if (STATE.timeRemaining <= 0) {
+      stopTimer();
+      showToast("⏰ Time's up! Turn passes to AI.");
+      setTurn('ai');
+      setTimeout(() => aiAskQuestion(), 600);
+    }
+  }, 1000);
+}
+
+function stopTimer() {
+  if (STATE.timerInterval) {
+    clearInterval(STATE.timerInterval);
+    STATE.timerInterval = null;
+  }
+}
+
+function _updateTimerDisplay() {
+  const el = document.getElementById('playerTimer');
+  if (!el) return;
+  const s = STATE.timeRemaining;
+  el.textContent = `⏱️ 00:${String(s).padStart(2, '0')}`;
+  el.classList.toggle('warning', s <= 10);
+}
+
+// ==========================================
+// 7. MODE 1 — YOU VS AI
+// ==========================================
+
+function initMode1() {
+  STATE.playerCandidates = [...CHARACTERS];
+  STATE.aiCandidates     = [...CHARACTERS];
+  STATE.playerHistory    = [];
+  STATE.aiHistory        = [];
+  STATE.currentTurn      = 'ai';
+  STATE.guessMode        = false;
+
   const pool = CHARACTERS.filter(c => c.id !== STATE.selectedChar);
   STATE.aiSelectedChar = pool[Math.floor(Math.random() * pool.length)];
 
   const playerChar = getCharacterById(STATE.selectedChar);
-  const playerCardDiv = document.getElementById('playerCharCard');
-  playerCardDiv.innerHTML = `
-    ${charAvatarHTML(playerChar, 'large')}
-    <div class="sc-name">${playerChar.name}</div>
-  `;
-  playerCardDiv.style.borderColor = STATE.selectedColor === 'blue' ? '#3498db' : '#e74c3c';
+  document.getElementById('playerCharCard').innerHTML =
+    `${charAvatar(playerChar, true)}<div class="sc-name">${playerChar.name}</div>`;
 
-  // Build grids (AI board face-down, player board face-up)
-  buildBoardGrid('aiBoardGrid', true);
-  buildBoardGrid('playerBoardGrid', false);
+  document.getElementById('aiHiddenCard').innerHTML =
+    `<div class="hidden-emoji">🎭</div><div class="sc-name">HIDDEN</div>`;
 
-  // Reset history and counts
-  document.getElementById('aiHistory').innerHTML = '';
+  buildBoardGrid('aiBoardGrid',    true);  
+  buildBoardGrid('playerBoardGrid', false);  
+
+  document.getElementById('aiHistory').innerHTML     = '';
   document.getElementById('playerHistory').innerHTML = '';
+
   updateCandidateCounts1();
-
-  // Reset guess mode badge
-  const badge = document.getElementById('guessModeBadge');
-  badge.textContent = 'GUESS MODE: OFF';
-  badge.className = 'turn-badge';
-  badge.style.color = '';
-  badge.style.borderColor = '';
-  badge.style.background = '';
-
+  updateScoreDisplay();
+  resetGuessBadge();
+  applyColorTheme(STATE.selectedColor);
   setTurn('ai');
 
-  // Small delay then AI asks first question
-  setTimeout(() => aiAskQuestion(), 800);
+  setTimeout(() => aiAskQuestion(), 900);
 }
+
+// ── Board building ────────────────
 
 function buildBoardGrid(gridId, faceDown) {
   const grid = document.getElementById(gridId);
+  if (!grid) return;
   grid.innerHTML = '';
+
   CHARACTERS.forEach(char => {
     const card = document.createElement('div');
     card.className = 'game-char-card' + (faceDown ? ' face-down' : '');
     card.id = `${gridId}-card-${char.id}`;
     card.innerHTML = `
-      <div class="card-front" style="background:linear-gradient(160deg, ${charBgColor(char)} 0%, #0a1628 100%)">
-        ${charAvatarHTML(char)}
+      <div class="card-front" style="background:linear-gradient(160deg,${charBgColor(char)} 0%,#0a1628 100%)">
+        ${charAvatar(char, false)}
         <div class="gc-name">${char.name}</div>
       </div>
-      <div class="card-back">🎴</div>
-    `;
+      <div class="card-back">🎴</div>`;
     if (!faceDown) {
-      // Player board: click to eliminate (normal) or guess (guess mode)
       card.onclick = () => handlePlayerCardClick(char.id);
     }
     grid.appendChild(card);
   });
 }
 
+// ── Turn management ─────────────────────────
+
 function setTurn(turn) {
   STATE.currentTurn = turn;
   const isAI = (turn === 'ai');
 
   const turnBadge = document.getElementById('turnBadge1');
-  turnBadge.textContent = isAI ? '🔴 AI\'S TURN' : '🟢 YOUR TURN';
-  turnBadge.className = `turn-badge ${isAI ? 'ai-turn' : 'player-turn'}`;
+  if (turnBadge) turnBadge.textContent = isAI ? "🤖 AI'S TURN" : '👤 YOUR TURN';
 
-  const playerTurnBadge = document.getElementById('playerTurnBadge1');
-  playerTurnBadge.textContent = isAI ? '⏳ WAIT...' : '🔵 YOUR TURN';
-  playerTurnBadge.className = `turn-badge ${isAI ? '' : 'player-turn'}`;
-  if (isAI) {
-    playerTurnBadge.style.cssText = 'background:rgba(0,0,0,0.2);border-color:rgba(255,255,255,0.1);color:var(--text-secondary)';
-  } else {
-    playerTurnBadge.style.cssText = '';
-  }
+  const playerBadge = document.getElementById('playerTurnBadge1');
+  if (playerBadge) playerBadge.textContent = isAI ? '⏳ WAIT…' : '🎮 YOUR TURN';
 
-  // YES/NO buttons only active during AI's turn
-  document.getElementById('btnYes').disabled = !isAI;
-  document.getElementById('btnNo').disabled = !isAI;
+  const btnYes = document.getElementById('btnYes');
+  const btnNo  = document.getElementById('btnNo');
+  if (btnYes) btnYes.disabled = !isAI;
+  if (btnNo)  btnNo.disabled  = !isAI;
 
-  // Question form only active during player's turn
-  document.getElementById('qCategory').disabled = isAI;
-  document.getElementById('qValue').disabled = isAI;
-  document.getElementById('askBtn').disabled = isAI;
-
-  // Guess button is always active — player can make a guess at any time
-  const guessModeBtn = document.querySelector('#page-game1 .btn-gold[onclick="toggleGuessMode()"]');
-  if (guessModeBtn) {
-    guessModeBtn.disabled = false;
-    guessModeBtn.style.opacity = '1';
-  }
-}
-
-function aiAskQuestion() {
-  if (!STATE.gameActive) return;
-  if (STATE.currentTurn !== 'ai') return;
-  if (STATE.aiCandidates.length === 0) return;
-  if (STATE.aiCandidates.length === 1) {
-    aiMakeGuess(STATE.aiCandidates[0]);
-    return;
-  }
-
-  // AI uses best-first to choose best question
-  const q = chooseBestQuestion(STATE.aiCandidates);
-  STATE.algoState = q;
-  const qBox = document.getElementById('aiCurrentQuestion');
-  qBox.textContent = q.text;
-  gsap.fromTo(qBox, { opacity: 0, x: -8 }, { opacity: 1, x: 0, duration: 0.4 });
-}
-
-function chooseBestQuestion(candidates) {
-  let best = null;
-  let bestScore = -1;
-  const categories = [
-    { attr: 'gender',    values: ['male', 'female'] },
-    { attr: 'glasses',   values: [true, false] },
-    { attr: 'beard',     values: [true, false] },
-    { attr: 'mustache',  values: [true, false] },
-    { attr: 'hairColor', values: ['brown', 'black', 'blonde', 'red', 'white'] },
-    { attr: 'hat',       values: [true, false] }
-  ];
-  for (const { attr, values } of categories) {
-    for (const val of values) {
-      const yes = candidates.filter(c => c[attr] === val).length;
-      const no  = candidates.length - yes;
-      if (yes === 0 || no === 0) continue;
-      const score = Math.min(yes, no);
-      if (score > bestScore) {
-        bestScore = score;
-        let text = '';
-        if (attr === 'gender') text = `Is the character ${val}?`;
-        else if (attr === 'hairColor') text = `Does this character have ${val} hair?`;
-        else if (attr === 'glasses') text = val ? 'Does this character wear glasses?' : 'Does this character NOT wear glasses?';
-        else if (attr === 'beard') text = val ? 'Does this character have a beard?' : 'Does this character have no beard?';
-        else if (attr === 'mustache') text = val ? 'Does this character have a mustache?' : 'No mustache on this character?';
-        else if (attr === 'hat') text = val ? 'Does this character wear a hat?' : 'Is this character not wearing a hat?';
-        else text = `${attr} = ${val}?`;
-        best = { attr, value: val, text };
-      }
-    }
-  }
-  if (!best) {
-    best = { attr: 'gender', value: 'male', text: 'Is the character male?' };
-  }
-  return best;
-}
-
-function answerAI(answer) {
-  if (!STATE.gameActive) return;
-  if (STATE.currentTurn !== 'ai') return;
-  const q = STATE.algoState;
-  if (!q) return;
-
-  // Disable buttons immediately to prevent double-click
-  document.getElementById('btnYes').disabled = true;
-  document.getElementById('btnNo').disabled = true;
-
-  const playerChar = getCharacterById(STATE.selectedChar);
-  const correctAnswer = (playerChar[q.attr] === q.value);
-
-  // Filter AI candidates based on the truth (not player's click)
-  STATE.aiCandidates = STATE.aiCandidates.filter(c => (c[q.attr] === q.value) === correctAnswer);
-
-  addHistory('aiHistory', q.text, correctAnswer ? 'YES ✓' : 'NO ✗');
-  updateCandidateCounts1();
-
-  // Animate eliminated cards on AI board
-  CHARACTERS.forEach(char => {
-    if (!STATE.aiCandidates.find(c => c.id === char.id)) {
-      const el = document.getElementById(`aiBoardGrid-card-${char.id}`);
-      if (el && !el.classList.contains('eliminated')) {
-        el.classList.add('eliminated');
-        gsap.to(el, {
-          rotateY: 180,
-          duration: 0.45,
-          onComplete: () => el.classList.add('face-down')
-        });
-      }
-    }
+  ['qCategory', 'qValue', 'askBtn'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = isAI;
   });
 
+  if (!isAI) {
+    startPlayerTimer();
+  } else {
+    stopTimer();
+    const timerEl = document.getElementById('playerTimer');
+    if (timerEl) timerEl.classList.remove('warning');
+  }
+}
+
+// ── AI question cycle ───────────────────────────────
+
+function aiAskQuestion() {
+  if (!STATE.gameActive || STATE.currentTurn !== 'ai') return;
+  if (STATE.aiCandidates.length === 0) return;
+
   if (STATE.aiCandidates.length === 1) {
-    setTimeout(() => aiMakeGuess(STATE.aiCandidates[0]), 900);
+    document.getElementById('aiCurrentQuestion').textContent =
+      'I think I know it… make your guess first!';
+    setTurn('player');
     return;
   }
 
-  setTurn('player');
-  document.getElementById('aiCurrentQuestion').textContent = 'Waiting for your question…';
+  const qBox = document.getElementById('aiCurrentQuestion');
+  const thinkingMsgs = ['🤔 Thinking…', '🧠 Analysing data…', '📊 Calculating best question…'];
+  qBox.textContent = thinkingMsgs[Math.floor(Math.random() * thinkingMsgs.length)];
+
+  const delay = getAIDelay();
+  setTimeout(() => {
+    if (!STATE.gameActive || STATE.currentTurn !== 'ai') return;
+
+    const q = getAIQuestionByDifficulty(STATE.aiCandidates);
+    if (!q) {
+      setTurn('player');
+      return;
+    }
+
+    if (q.isDirect) {
+      qBox.textContent = q.text;
+      return; 
+    }
+
+    qBox.textContent = q.text;
+
+    STATE._pendingAIQuestion = q;
+
+    const btnYes = document.getElementById('btnYes');
+    const btnNo  = document.getElementById('btnNo');
+    if (btnYes) btnYes.disabled = false;
+    if (btnNo)  btnNo.disabled  = false;
+  }, delay);
 }
 
-function aiMakeGuess(char) {
-  addHistory('aiHistory', `FINAL GUESS: ${char.name}`, '🎯');
-  const correct = (char.id === STATE.selectedChar);
-  // AI wins if it guessed correctly → player loses
-  setTimeout(() => showResult(!correct, STATE.aiSelectedChar), 1100);
+/**
+ * @param {boolean} answer  true = YES, false = NO
+ */
+function answerAI(answer) {
+  if (!STATE.gameActive || STATE.currentTurn !== 'ai') return;
+
+  const q = STATE._pendingAIQuestion;
+  if (!q) return;
+
+  document.getElementById('btnYes').disabled = true;
+  document.getElementById('btnNo').disabled  = true;
+  STATE._pendingAIQuestion = null;
+
+  const playerChar   = getCharacterById(STATE.selectedChar);
+  const correctAnswer = (playerChar[q.attr] === q.value);
+
+  const usedAnswer = answer; 
+
+  STATE.aiCandidates = STATE.aiCandidates.filter(
+    c => (c[q.attr] === q.value) === usedAnswer
+  );
+
+  const histEntry = { question: q.text, answer: usedAnswer ? 'YES ✓' : 'NO ✗' };
+  STATE.aiHistory.push(histEntry);
+  _addHistoryItem('aiHistory', histEntry.question, histEntry.answer);
+  updateCandidateCounts1();
+  updateAIBoardFiltered();
+
+  if (STATE.aiCandidates.length === 1) {
+    document.getElementById('aiCurrentQuestion').textContent =
+      'I think I know it… make your guess first!';
+    setTurn('player');
+  } else if (STATE.aiCandidates.length === 0) {
+
+    STATE.aiCandidates = [...CHARACTERS];
+    showToast('⚠️ Something went wrong. AI candidates reset.');
+    setTurn('player');
+  } else {
+    setTurn('player');
+  }
 }
+
+// ── AI board display ───────────────────────────────────────
+
+function updateAIBoardFiltered() {
+  const candidateIds = new Set(STATE.aiCandidates.map(c => c.id));
+
+  CHARACTERS.forEach(char => {
+    const el = document.getElementById(`aiBoardGrid-card-${char.id}`);
+    if (!el) return;
+    if (candidateIds.has(char.id)) {
+      el.style.display = 'flex';
+      if (el.classList.contains('face-down')) {
+        el.classList.remove('face-down', 'eliminated');
+        if (typeof gsap !== 'undefined') {
+          gsap.fromTo(el, { rotateY: 180 }, { rotateY: 0, duration: 0.45 });
+        }
+      }
+    } else {
+      el.style.display = 'none';
+    }
+  });
+}
+
+// ── Player card click handler ──────────────────────────────────
 
 function handlePlayerCardClick(charId) {
   if (!STATE.gameActive) return;
 
-  // GUESS MODE: make final guess — always allowed regardless of whose turn it is
   if (STATE.guessMode) {
     const card = document.getElementById(`playerBoardGrid-card-${charId}`);
-    // Don't allow guessing an already-eliminated card
+    if (card && card.classList.contains('face-down')) return; 
     if (card && card.classList.contains('eliminated')) return;
+
     const correct = (charId === STATE.aiSelectedChar.id);
 
-    // Visual feedback on the clicked card
-    if (card) {
+    if (card && typeof gsap !== 'undefined') {
       gsap.to(card, {
-        scale: 1.15,
-        duration: 0.2,
-        yoyo: true,
-        repeat: 1,
+        scale: 1.18, duration: 0.18, yoyo: true, repeat: 1,
         onComplete: () => {
           gsap.to(card, {
             boxShadow: correct
-              ? '0 0 24px rgba(39,174,96,0.8), 0 0 48px rgba(39,174,96,0.4)'
-              : '0 0 24px rgba(231,76,60,0.8), 0 0 48px rgba(231,76,60,0.4)',
+              ? '0 0 28px rgba(39,174,96,0.9)'
+              : '0 0 28px rgba(231,76,60,0.9)',
             borderColor: correct ? '#27ae60' : '#e74c3c',
             duration: 0.3
           });
@@ -430,180 +598,207 @@ function handlePlayerCardClick(charId) {
       });
     }
 
-    // Stop everything and resolve the game
-    STATE.gameActive = false;
     STATE.guessMode = false;
-    const badge = document.getElementById('guessModeBadge');
-    badge.textContent = 'GUESS MODE: OFF';
-    badge.className = 'turn-badge';
-    badge.style.color = '';
-    badge.style.borderColor = '';
-    badge.style.background = '';
+    resetGuessBadge();
+    document.querySelectorAll('#playerBoardGrid .game-char-card')
+      .forEach(c => c.classList.remove('guess-highlight'));
 
-    // Remove guess-mode cursor from all player cards
-    document.querySelectorAll('#playerBoardGrid .game-char-card').forEach(c => {
-      c.classList.remove('guess-highlight');
-    });
-
-    // Reveal the AI's hidden character on the board
-    const aiHiddenCard = document.getElementById('aiHiddenCard');
-    if (aiHiddenCard && STATE.aiSelectedChar) {
-      aiHiddenCard.innerHTML = `
-        ${charAvatarHTML(STATE.aiSelectedChar, 'large')}
-        <div class="sc-name">${STATE.aiSelectedChar.name}</div>
-      `;
-      aiHiddenCard.style.borderColor = correct ? '#27ae60' : '#e74c3c';
-      gsap.fromTo(aiHiddenCard, { scale: 0.8, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.5 });
+    const aiHidden = document.getElementById('aiHiddenCard');
+    if (aiHidden && STATE.aiSelectedChar) {
+      aiHidden.innerHTML =
+        `${charAvatar(STATE.aiSelectedChar, true)}<div class="sc-name">${STATE.aiSelectedChar.name}</div>`;
+      aiHidden.style.borderColor = correct ? '#27ae60' : '#e74c3c';
+      if (typeof gsap !== 'undefined') {
+        gsap.fromTo(aiHidden, { scale: 0.8, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.45 });
+      }
     }
 
-    setTimeout(() => showResult(correct, STATE.aiSelectedChar), 900);
+    if (correct) {
+      // ── WIN ──
+      STATE.gameActive = false;
+      stopTimer();
+      const scoreEarned = Math.max(100 - STATE.metrics.questions * 5, 10);
+      STATE.playerScore += scoreEarned;
+      addWin(scoreEarned, Date.now() - STATE.metrics.startTime);
+      showToast(`🎉 Correct! +${scoreEarned} points!`);
+      setTimeout(() => showResult(true, STATE.aiSelectedChar, scoreEarned), 900);
+    } else {
+      STATE.guessesLeft--;
+      updateScoreDisplay();
+      if (STATE.guessesLeft > 0) {
+        // ── WRONG GUESS but still has guesses left ──
+        showToast(`❌ Wrong! ${STATE.guessesLeft} guess${STATE.guessesLeft > 1 ? 'es' : ''} remaining.`);
+        STATE.gameActive = true; // keep playing
+        setTurn('ai');
+        setTimeout(() => {
+          // check if AI can immediately guess
+          if (STATE.aiCandidates.length === 1) {
+            aiMakeGuess(STATE.aiCandidates[0]);
+          } else {
+            aiAskQuestion();
+          }
+        }, 1500);
+      } else {
+        // ── WRONG GUESS and no guesses left → LOSE ──
+        STATE.gameActive = false;
+        stopTimer();
+        addLoss();
+        showToast('❌ No guesses left! Game over.');
+        setTimeout(() => showResult(false, STATE.aiSelectedChar, 0), 900);
+      }
+    }
     return;
   }
 
-  // NORMAL MODE: eliminate a character (only during player's turn)
+  // ── NORMAL MODE: click to eliminate on player's turn only ──
   if (STATE.currentTurn !== 'player') {
-    // Flash a hint that it's not their turn
     const badge = document.getElementById('playerTurnBadge1');
-    gsap.fromTo(badge, { x: -4 }, { x: 4, duration: 0.06, repeat: 5, yoyo: true });
+    if (badge && typeof gsap !== 'undefined') {
+      gsap.fromTo(badge, { x: -4 }, { x: 4, duration: 0.06, repeat: 5, yoyo: true });
+    }
+    showToast("⛔ It's not your turn!");
     return;
   }
 
   const cardEl = document.getElementById(`playerBoardGrid-card-${charId}`);
   if (!cardEl || cardEl.classList.contains('eliminated')) return;
 
-  // Remove from playerCandidates
+  // Remove from player candidates (player manually eliminates)
   STATE.playerCandidates = STATE.playerCandidates.filter(c => c.id !== charId);
   cardEl.classList.add('eliminated');
-  gsap.to(cardEl, { opacity: 0.18, duration: 0.35 });
+  if (typeof gsap !== 'undefined') {
+    gsap.to(cardEl, { opacity: 0.15, duration: 0.35 });
+  } else {
+    cardEl.style.opacity = '0.15';
+  }
   updateCandidateCounts1();
 }
 
+// ── Player asks a question ──────────────────────────────────────────────────
+
 function playerAskQuestion() {
-  if (!STATE.gameActive) return;
-  if (STATE.currentTurn !== 'player') return;
+  if (!STATE.gameActive || STATE.currentTurn !== 'player') return;
 
   const cat = document.getElementById('qCategory').value;
   const val = document.getElementById('qValue').value;
-  if (!cat || !val) return;
+  if (!cat || !val) { showToast('⚠️ Select a category and value first!'); return; }
 
-  const parsedVal = (val === 'true') ? true : (val === 'false') ? false : val;
-  const aiChar = STATE.aiSelectedChar;
-  const answer = (aiChar[cat] === parsedVal);
-  const questionText = document.getElementById('questionPreview').textContent || `${cat} = ${val}?`;
+  // Parse value to correct type
+  const parsedVal = val === 'true' ? true : val === 'false' ? false : val;
 
-  // Filter player candidates based on the AI's hidden character
-  STATE.playerCandidates = STATE.playerCandidates.filter(c => (c[cat] === parsedVal) === answer);
-  addHistory('playerHistory', questionText, answer ? 'YES ✓' : 'NO ✗');
-  updateCandidateCounts1();
+  // Answer based on AI's hidden character
+  const answer       = (STATE.aiSelectedChar[cat] === parsedVal);
+  const questionText = document.getElementById('questionPreview').textContent
+    || buildQuestionText(cat, parsedVal);
 
-  // Animate eliminated cards on player board
+  // Filter player's candidate list
+  STATE.playerCandidates = STATE.playerCandidates.filter(
+    c => (c[cat] === parsedVal) === answer
+  );
+
+  // Update visual eliminations on player's board
+  const playerIds = new Set(STATE.playerCandidates.map(c => c.id));
   CHARACTERS.forEach(char => {
-    if (!STATE.playerCandidates.find(c => c.id === char.id)) {
+    if (!playerIds.has(char.id)) {
       const el = document.getElementById(`playerBoardGrid-card-${char.id}`);
       if (el && !el.classList.contains('eliminated')) {
         el.classList.add('eliminated');
-        gsap.to(el, { opacity: 0.18, duration: 0.35 });
+        if (typeof gsap !== 'undefined') {
+          gsap.to(el, { opacity: 0.15, duration: 0.35 });
+        } else {
+          el.style.opacity = '0.15';
+        }
       }
     }
   });
+
+  const histEntry = { question: questionText, answer: answer ? 'YES ✓' : 'NO ✗' };
+  STATE.playerHistory.push(histEntry);
+  _addHistoryItem('playerHistory', histEntry.question, histEntry.answer);
+  updateCandidateCounts1();
+  STATE.metrics.questions++;
 
   // Reset question form
   document.getElementById('qCategory').value = '';
   document.getElementById('qValue').innerHTML = '<option value="">— Select Value —</option>';
   document.getElementById('questionPreview').textContent = '';
 
-  // If player narrowed down to 1 candidate, they can guess right away
-  if (STATE.playerCandidates.length === 1) {
-    addHistory('playerHistory', `Only 1 candidate left: ${STATE.playerCandidates[0].name}`, '💡');
-  }
-
-  // Switch turn to AI
+  stopTimer();
   setTurn('ai');
-  setTimeout(() => aiAskQuestion(), 1000);
-}
 
-// ============================================
-// GUESS MODE TOGGLE
-// ============================================
-function toggleGuessMode() {
-  if (!STATE.gameActive) return;
-
-  STATE.guessMode = !STATE.guessMode;
-  const badge = document.getElementById('guessModeBadge');
-
-  if (STATE.guessMode) {
-    badge.textContent = '🎯 CLICK A CHARACTER TO GUESS!';
-    badge.className = 'turn-badge guess-active';
-    badge.style.color = 'var(--gold)';
-    badge.style.borderColor = 'var(--gold)';
-    badge.style.background = 'rgba(232,200,74,0.12)';
-
-    // Highlight all non-eliminated cards on player board
-    document.querySelectorAll('#playerBoardGrid .game-char-card:not(.eliminated):not(.face-down)').forEach(c => {
-      c.classList.add('guess-highlight');
-    });
-
-    // Pulse animation on badge
-    gsap.fromTo(badge, { scale: 0.95 }, { scale: 1.03, duration: 0.3, yoyo: true, repeat: 3 });
-
-    // Show a toast hint
-    showToast('🎯 Click any character to make your final guess!');
-  } else {
-    badge.textContent = 'GUESS MODE: OFF';
-    badge.className = 'turn-badge';
-    badge.style.color = '';
-    badge.style.borderColor = '';
-    badge.style.background = '';
-
-    // Remove highlight from player board cards
-    document.querySelectorAll('#playerBoardGrid .game-char-card').forEach(c => {
-      c.classList.remove('guess-highlight');
-    });
-  }
-}
-
-// ============================================
-// TOAST NOTIFICATION
-// ============================================
-function showToast(message) {
-  let toast = document.getElementById('gameToast');
-  if (!toast) {
-    toast = document.createElement('div');
-    toast.id = 'gameToast';
-    toast.style.cssText = `
-      position: fixed;
-      bottom: 24px;
-      left: 50%;
-      transform: translateX(-50%) translateY(60px);
-      background: linear-gradient(135deg, #0f2040, #1a3060);
-      border: 1px solid var(--gold);
-      color: var(--gold);
-      font-family: 'Orbitron', monospace;
-      font-size: 11px;
-      letter-spacing: 1px;
-      padding: 10px 22px;
-      border-radius: 6px;
-      z-index: 9999;
-      box-shadow: 0 0 18px rgba(232,200,74,0.3);
-      pointer-events: none;
-      opacity: 0;
-    `;
-    document.body.appendChild(toast);
-  }
-  toast.textContent = message;
-  gsap.killTweensOf(toast);
-  gsap.to(toast, { opacity: 1, y: 0, duration: 0.3, ease: 'back.out(1.4)',
-    onComplete: () => {
-      gsap.to(toast, { opacity: 0, y: 20, duration: 0.4, delay: 2.2 });
+  // AI's turn: either guess or ask another question
+  setTimeout(() => {
+    if (!STATE.gameActive) return;
+    if (STATE.aiCandidates.length === 1) {
+      aiMakeGuess(STATE.aiCandidates[0]);
+    } else {
+      aiAskQuestion();
     }
-  });
+  }, 800);
 }
 
-// ============================================
-// QUESTION PREVIEW
-// ============================================
+// ── AI makes a final guess ──────────────────────────────────────────────────
+
+function aiMakeGuess(char) {
+  if (!STATE.gameActive) return;
+  STATE.gameActive = false;
+  stopTimer();
+
+  const histEntry = { question: `FINAL GUESS: ${char.name}`, answer: '🎯' };
+  STATE.aiHistory.push(histEntry);
+  _addHistoryItem('aiHistory', histEntry.question, histEntry.answer);
+
+  const correct = (char.id === STATE.selectedChar);
+
+  if (correct) {
+    addLoss();
+    showToast(`🤖 AI guessed "${char.name}" — AI wins! You lose.`);
+  } else {
+    addWin(50, Date.now() - STATE.metrics.startTime);
+    showToast(`🤖 AI guessed "${char.name}" — WRONG! You win!`);
+  }
+
+  // Reveal AI's card
+  const aiHidden = document.getElementById('aiHiddenCard');
+  if (aiHidden && STATE.aiSelectedChar) {
+    aiHidden.innerHTML =
+      `${charAvatar(STATE.aiSelectedChar, true)}<div class="sc-name">${STATE.aiSelectedChar.name}</div>`;
+    aiHidden.style.borderColor = correct ? '#e74c3c' : '#27ae60';
+  }
+
+  setTimeout(() => showResult(!correct, STATE.aiSelectedChar, correct ? 0 : 50), 1100);
+}
+
+// ── UI helpers ──────────────────────────────────────────────────────────────
+
+/** Add one entry to a history list (prepend so newest is on top). */
+function _addHistoryItem(listId, question, answer) {
+  const container = document.getElementById(listId);
+  if (!container) return;
+  const item = document.createElement('div');
+  item.className = 'history-item';
+  item.innerHTML = `<span class="h-q">${question}</span> → <span class="h-a">${answer}</span>`;
+  container.insertBefore(item, container.firstChild);
+}
+
+/** Sync the displayed candidate counts with current STATE. */
+function updateCandidateCounts1() {
+  const aiEl = document.getElementById('aiCandidates1');
+  const plEl = document.getElementById('playerCandidates1');
+  if (aiEl) aiEl.textContent = STATE.aiCandidates.length;
+  if (plEl) plEl.textContent = STATE.playerCandidates.length;
+}
+
+function updateScoreDisplay() {
+  const scoreEl   = document.getElementById('playerScore');
+  const guessesEl = document.getElementById('guessesLeft');
+  if (scoreEl)   scoreEl.textContent   = STATE.playerScore;
+  if (guessesEl) guessesEl.textContent = STATE.guessesLeft;
+}
+
+/** Update the "Value" dropdown when player changes category. */
 function updateQuestionPreview() {
-  const cat = document.getElementById('qCategory').value;
+  const cat    = document.getElementById('qCategory').value;
   const valSel = document.getElementById('qValue');
   valSel.innerHTML = '<option value="">— Select Value —</option>';
   document.getElementById('questionPreview').textContent = '';
@@ -616,144 +811,179 @@ function updateQuestionPreview() {
     hairColor: ['brown', 'black', 'blonde', 'red', 'white'],
     hat:       ['true', 'false']
   };
+
   if (cat && options[cat]) {
     options[cat].forEach(v => {
       const opt = document.createElement('option');
       opt.value = v;
-      let display = v;
-      if (v === 'true') display = 'Yes';
-      else if (v === 'false') display = 'No';
-      else display = v.charAt(0).toUpperCase() + v.slice(1);
-      opt.textContent = display;
+      opt.textContent = v === 'true' ? 'Yes' : v === 'false' ? 'No'
+        : v.charAt(0).toUpperCase() + v.slice(1);
       valSel.appendChild(opt);
     });
-  }
 
-  valSel.onchange = () => {
-    const v = valSel.value;
-    if (!cat || !v) {
-      document.getElementById('questionPreview').textContent = '';
-      return;
-    }
-    const labels = {
-      gender:    `Is the character ${v}?`,
-      glasses:   v === 'true' ? 'Does the character wear glasses?' : 'Does the character NOT wear glasses?',
-      beard:     v === 'true' ? 'Does the character have a beard?' : 'Does the character have no beard?',
-      mustache:  v === 'true' ? 'Does the character have a mustache?' : 'No mustache?',
-      hairColor: `Does the character have ${v} hair?`,
-      hat:       v === 'true' ? 'Does the character wear a hat?' : 'No hat?'
+    valSel.onchange = () => {
+      const v = valSel.value;
+      if (!v) { document.getElementById('questionPreview').textContent = ''; return; }
+      const parsedVal = v === 'true' ? true : v === 'false' ? false : v;
+      document.getElementById('questionPreview').textContent =
+        buildQuestionText(cat, parsedVal);
     };
-    document.getElementById('questionPreview').textContent = labels[cat] || '';
-  };
+  }
 }
 
-function addHistory(listId, question, answer) {
-  const container = document.getElementById(listId);
-  const item = document.createElement('div');
-  item.className = 'history-item';
-  item.innerHTML = `<span class="h-q">${question}</span> → <span class="h-a">${answer}</span>`;
-  container.insertBefore(item, container.firstChild);
+// ── Guess mode ──────────────────────────────────────────────────────────────
+
+function toggleGuessMode() {
+  if (!STATE.gameActive) return;
+  STATE.guessMode = !STATE.guessMode;
+  const badge = document.getElementById('guessModeBadge');
+
+  if (STATE.guessMode) {
+    if (badge) { badge.textContent = '🎯 CLICK A CHARACTER TO GUESS!'; badge.classList.add('guess-active'); }
+    document.querySelectorAll('#playerBoardGrid .game-char-card:not(.face-down):not(.eliminated)')
+      .forEach(c => c.classList.add('guess-highlight'));
+    showToast('🎯 GUESS MODE ON — click any character!');
+  } else {
+    resetGuessBadge();
+    document.querySelectorAll('#playerBoardGrid .game-char-card')
+      .forEach(c => c.classList.remove('guess-highlight'));
+  }
 }
 
-function updateCandidateCounts1() {
-  document.getElementById('aiCandidates1').textContent = STATE.aiCandidates.length;
-  document.getElementById('playerCandidates1').textContent = STATE.playerCandidates.length;
+function resetGuessBadge() {
+  const badge = document.getElementById('guessModeBadge');
+  if (badge) { badge.textContent = '🎯 GUESS MODE: OFF'; badge.classList.remove('guess-active'); }
 }
 
-// ============================================
-// MODE 2 : AI GUESSES
-// ============================================
+// ==========================================
+// 8. MODE 2 — AI GUESSES
+// ==========================================
+
 function initMode2() {
-  STATE.playerCandidates = [...CHARACTERS];
-  STATE.aiCandidates = [...CHARACTERS];
-  STATE.metrics = {
-    startTime: Date.now(),
-    questions: 0,
-    nodes: 0
-  };
+  STATE.aiCandidates   = [...CHARACTERS];
+  STATE.metrics        = { startTime: Date.now(), questions: 0, nodes: 0 };
   STATE.autoRunInterval = null;
 
-  const playerChar = getCharacterById(STATE.selectedChar);
-  const secretCard = document.getElementById('playerSecretCard');
-  secretCard.innerHTML = `
-    ${charAvatarHTML(playerChar, 'large')}
-    <div class="sc-name">${playerChar.name}</div>
-  `;
+  // Show player's secret card
+  const playerChar   = getCharacterById(STATE.selectedChar);
+  const secretCard   = document.getElementById('playerSecretCard');
+  if (secretCard) secretCard.innerHTML =
+    `${charAvatar(playerChar, true)}<div class="sc-name">${playerChar.name}</div>`;
 
+  // Display algorithm name
   const algo = ALGORITHMS.find(a => a.id === STATE.selectedAlgo);
-  document.getElementById('algoNameDisplay').textContent = algo?.name || '—';
-  document.getElementById('algoNameDisplay').style.color = algo?.color || 'var(--gold)';
+  const algoNameEl = document.getElementById('algoNameDisplay');
+  if (algoNameEl) {
+    algoNameEl.textContent = algo ? algo.name : '—';
+    algoNameEl.style.color = algo ? algo.color : 'var(--gold)';
+  }
 
-  // Reset buttons
-  document.getElementById('autoRunBtn').textContent = '⚡ AUTO RUN';
-  document.getElementById('mode2Question').textContent = 'Press RUN STEP to begin';
+  // Reset controls
+  const autoRunBtn = document.getElementById('autoRunBtn');
+  const runBtn     = document.getElementById('runAlgoBtn');
+  if (autoRunBtn) { autoRunBtn.textContent = '⚡ AUTO RUN'; autoRunBtn.disabled = false; }
+  if (runBtn)     runBtn.disabled = false;
+
+  const q2 = document.getElementById('mode2Question');
+  if (q2) q2.textContent = 'Press RUN STEP to begin…';
 
   buildMode2Board();
   updateMetrics2();
+  initAlgorithmState(STATE.selectedAlgo);
 
-  STATE.algoState = initAlgorithm(STATE.selectedAlgo, [...CHARACTERS]);
-  logEntry('highlight', `▶ ${algo?.name} initialized`);
+  const log = document.getElementById('reasoningLog');
+  if (log) log.innerHTML = '';
+  logEntry('highlight', `▶ ${algo ? algo.name : '?'} initialised`);
   logEntry('highlight', `Searching among ${CHARACTERS.length} characters…`);
 }
 
 function buildMode2Board() {
   const grid = document.getElementById('mode2BoardGrid');
+  if (!grid) return;
   grid.innerHTML = '';
+
   CHARACTERS.forEach(char => {
     const card = document.createElement('div');
     card.className = 'game-char-card';
     card.id = `m2-card-${char.id}`;
     card.innerHTML = `
-      <div class="card-front" style="background:linear-gradient(160deg, ${charBgColor(char)} 0%, #0a1628 100%)">
-        ${charAvatarHTML(char)}
+      <div class="card-front" style="background:linear-gradient(160deg,${charBgColor(char)} 0%,#0a1628 100%)">
+        ${charAvatar(char, false)}
         <div class="gc-name">${char.name}</div>
       </div>
-      <div class="card-back">🎴</div>
-    `;
+      <div class="card-back">🎴</div>`;
     grid.appendChild(card);
   });
 }
 
 function logEntry(type, text) {
-  const logDiv = document.getElementById('reasoningLog');
+  const log = document.getElementById('reasoningLog');
+  if (!log) return;
   const entry = document.createElement('div');
   entry.className = `log-entry ${type}`;
   entry.textContent = `> ${text}`;
-  logDiv.insertBefore(entry, logDiv.firstChild);
+  log.insertBefore(entry, log.firstChild);
 }
 
 function updateMetrics2() {
   const elapsed = Date.now() - STATE.metrics.startTime;
-  document.getElementById('metricTime').textContent = elapsed;
-  document.getElementById('metricQuestions').textContent = STATE.metrics.questions;
-  document.getElementById('metricNodes').textContent = STATE.metrics.nodes;
-  document.getElementById('aiCandidates2').textContent = STATE.aiCandidates.length;
+  const setEl = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
+
+  setEl('metricTime',      elapsed);
+  setEl('metricQuestions', STATE.metrics.questions);
+  setEl('metricNodes',     STATE.metrics.nodes);
+  setEl('aiCandidates2',   STATE.aiCandidates.length);
+  setEl('aiTimer2',        (elapsed / 1000).toFixed(3));
+
   const efficiency = STATE.metrics.questions > 0
-    ? Math.round((1 - STATE.metrics.questions / 24) * 100) + '%'
+    ? Math.round((1 - STATE.metrics.questions / CHARACTERS.length) * 100) + '%'
     : '—';
-  document.getElementById('metricScore').textContent = efficiency;
-  document.getElementById('aiTimer2').textContent = (elapsed / 1000).toFixed(3);
+  setEl('metricScore', efficiency);
 }
 
 function runNextStep() {
   if (!STATE.gameActive) return;
-  if (STATE.aiCandidates.length === 0) return;
+
+  if (STATE.aiCandidates.length === 0) {
+    stopAutoRun();
+    logEntry('eliminate', 'ERROR: no candidates remain — game cannot continue');
+    return;
+  }
+
   if (STATE.aiCandidates.length === 1) {
+    stopAutoRun();
     finalGuess(STATE.aiCandidates[0]);
     return;
   }
 
-  const step = algorithmStep(STATE.selectedAlgo, STATE.algoState, STATE.aiCandidates);
-  if (!step) return;
+  let step;
+  try {
+    step = algorithmStep(STATE.selectedAlgo, STATE.aiCandidates);
+  } catch (err) {
+    logEntry('eliminate', `Algorithm error: ${err.message}`);
+    stopAutoRun();
+    return;
+  }
+
+  if (!step) {
+    const pairs = getAllCandidatePairs(STATE.aiCandidates);
+    if (!pairs.length) {
+      stopAutoRun();
+      finalGuess(STATE.aiCandidates[0]);
+      return;
+    }
+    pairs.sort((a, b) => Math.min(b.yes, b.no) - Math.min(a.yes, a.no));
+    step = makeStep(pairs[0].attr, pairs[0].value, pairs.length, 'Fallback best-first');
+  }
 
   STATE.metrics.questions++;
   STATE.metrics.nodes += step.nodesExplored || 1;
 
-  document.getElementById('mode2Question').textContent = step.question;
-  gsap.fromTo('#mode2Question', { opacity: 0 }, { opacity: 1, duration: 0.4 });
-
+  const q2El = document.getElementById('mode2Question');
+  if (q2El) q2El.textContent = step.question;
   logEntry('question', `Q${STATE.metrics.questions}: ${step.question}`);
   if (step.note) logEntry('highlight', step.note);
+
 
   const playerChar = getCharacterById(STATE.selectedChar);
   const answer = (playerChar[step.attr] === step.value);
@@ -761,20 +991,22 @@ function runNextStep() {
 
   const before = STATE.aiCandidates.length;
   STATE.aiCandidates = STATE.aiCandidates.filter(c => (c[step.attr] === step.value) === answer);
-  const eliminated = before - STATE.aiCandidates.length;
-  logEntry('eliminate', `Eliminated ${eliminated} | Remaining: ${STATE.aiCandidates.length}`);
+  logEntry('eliminate',
+    `Eliminated ${before - STATE.aiCandidates.length} | Remaining: ${STATE.aiCandidates.length}`);
 
-  // Animate eliminated cards
+
+    const remainingIds = new Set(STATE.aiCandidates.map(c => c.id));
   CHARACTERS.forEach(char => {
-    if (!STATE.aiCandidates.find(c => c.id === char.id)) {
+    if (!remainingIds.has(char.id)) {
       const el = document.getElementById(`m2-card-${char.id}`);
       if (el && !el.classList.contains('eliminated')) {
         el.classList.add('eliminated');
-        gsap.to(el, {
-          rotateY: 180,
-          duration: 0.45,
-          onComplete: () => el.classList.add('face-down')
-        });
+        if (typeof gsap !== 'undefined') {
+          gsap.to(el, { rotateY: 180, duration: 0.45,
+            onComplete: () => el.classList.add('face-down') });
+        } else {
+          el.classList.add('face-down');
+        }
       }
     }
   });
@@ -784,44 +1016,61 @@ function runNextStep() {
   if (STATE.aiCandidates.length === 1) {
     stopAutoRun();
     setTimeout(() => finalGuess(STATE.aiCandidates[0]), 700);
+  } else if (STATE.aiCandidates.length === 0) {
+    stopAutoRun();
+    logEntry('eliminate', 'ERROR: all candidates eliminated — cannot guess');
   }
 }
 
 function finalGuess(char) {
   if (!STATE.gameActive) return;
   STATE.gameActive = false;
-  logEntry('found', `🎯 FOUND: ${char.name}!`);
+  logEntry('found', `🎯 AI GUESSES: ${char.name}!`);
   updateMetrics2();
 
-  // Highlight the guessed character
   const el = document.getElementById(`m2-card-${char.id}`);
   if (el) {
-    gsap.to(el, {
-      scale: 1.2,
-      boxShadow: '0 0 28px rgba(232,200,74,0.8)',
-      borderColor: 'var(--gold)',
-      duration: 0.4
-    });
+    el.classList.remove('face-down', 'eliminated');
+    el.style.transform = 'none';
+    if (typeof gsap !== 'undefined') {
+      gsap.to(el, {
+        scale: 1.22,
+        boxShadow: '0 0 32px rgba(232,200,74,0.9)',
+        borderColor: 'var(--gold)',
+        duration: 0.4
+      });
+    }
   }
 
   const correct = (char.id === STATE.selectedChar);
-  const algo = ALGORITHMS.find(a => a.id === STATE.selectedAlgo);
+  const algo    = ALGORITHMS.find(a => a.id === STATE.selectedAlgo);
   const elapsed = Date.now() - STATE.metrics.startTime;
-  setTimeout(() => showResultMode2(correct, char, algo?.name || 'AI', elapsed), 900);
+
+  if (correct) {
+    addLoss();   
+  } else {
+    addWin(100, elapsed);  
+  }
+
+  setTimeout(() => showResultMode2(correct, char, algo ? algo.name : 'AI', elapsed), 900);
 }
+
+// ── Auto run ─────────────────────────────────────────
 
 function toggleAutoRun() {
   if (STATE.autoRunInterval) {
     stopAutoRun();
   } else {
-    document.getElementById('autoRunBtn').textContent = '⏹ STOP AUTO';
+    if (!STATE.gameActive) return;
+    const btn = document.getElementById('autoRunBtn');
+    if (btn) btn.textContent = '⏹ STOP AUTO';
     STATE.autoRunInterval = setInterval(() => {
-      if (STATE.aiCandidates.length <= 1 || !STATE.gameActive) {
+      if (!STATE.gameActive || STATE.aiCandidates.length <= 1) {
         stopAutoRun();
         return;
       }
       runNextStep();
-    }, 850);
+    }, 900);
   }
 }
 
@@ -832,104 +1081,4 @@ function stopAutoRun() {
   }
   const btn = document.getElementById('autoRunBtn');
   if (btn) btn.textContent = '⚡ AUTO RUN';
-}
-
-// ============================================
-// RESULT SCREENS
-// ============================================
-function showResult(playerWon, aiChar) {
-  STATE.gameActive = false;
-  stopAutoRun();
-  document.getElementById('resultMetrics').style.display = 'none';
-
-  const icon = document.getElementById('resultIcon');
-  const titleEl = document.getElementById('resultTitle');
-  const descEl = document.getElementById('resultDesc');
-
-  if (playerWon) {
-    icon.textContent = '🏆';
-    titleEl.textContent = 'YOU WIN!';
-    titleEl.className = 'win';
-    descEl.innerHTML = `🎉 <strong>Brilliant deduction!</strong> You correctly identified the AI's character — <strong>${aiChar ? aiChar.name : 'the hidden one'}</strong>!`;
-  } else {
-    icon.textContent = '💀';
-    titleEl.textContent = 'GAME OVER';
-    titleEl.className = 'lose';
-    descEl.innerHTML = `The AI identified your character first. Better luck next time!`;
-  }
-
-  populateResultChar(aiChar);
-  openModal('resultModal');
-}
-
-function showResultMode2(correct, guessedChar, algoName, elapsed) {
-  document.getElementById('resultIcon').textContent = correct ? '🤖' : '🎉';
-  const titleEl = document.getElementById('resultTitle');
-  titleEl.textContent = correct ? 'AI WINS!' : 'YOU WIN!';
-  titleEl.className = correct ? 'lose' : 'win';
-  document.getElementById('resultDesc').textContent = correct
-    ? `The ${algoName} algorithm correctly identified your character!`
-    : 'The AI guessed incorrectly!';
-  populateResultChar(guessedChar);
-
-  const metricsDiv = document.getElementById('resultMetrics');
-  const metricsGrid = document.getElementById('resultMetricsGrid');
-  metricsDiv.style.display = 'block';
-  metricsGrid.innerHTML = `
-    <div class="metric-box"><div class="m-val" style="font-size:13px">${algoName}</div><div class="m-label">ALGORITHM</div></div>
-    <div class="metric-box"><div class="m-val">${elapsed}ms</div><div class="m-label">TIME</div></div>
-    <div class="metric-box"><div class="m-val">${STATE.metrics.questions}</div><div class="m-label">QUESTIONS</div></div>
-    <div class="metric-box"><div class="m-val">${STATE.metrics.nodes}</div><div class="m-label">NODES</div></div>
-  `;
-  openModal('resultModal');
-}
-
-function populateResultChar(char) {
-  const avatarDiv = document.getElementById('resultCharAvatar');
-  avatarDiv.innerHTML = charAvatarHTML(char, 'large');
-  document.getElementById('resultCharName').textContent = char.name;
-
-  const traitsDiv = document.getElementById('resultCharTraits');
-  traitsDiv.innerHTML = '';
-  const traits = [
-    char.gender,
-    char.glasses ? 'Glasses' : null,
-    char.beard ? 'Beard' : null,
-    char.mustache ? 'Mustache' : null,
-    char.hat ? 'Hat' : null,
-    char.hairColor + ' hair'
-  ];
-  traits.filter(Boolean).forEach(t => {
-    const tag = document.createElement('span');
-    tag.className = 'info-tag';
-    tag.textContent = t;
-    traitsDiv.appendChild(tag);
-  });
-}
-
-// ============================================
-// LANDING ANIMATION
-// ============================================
-function initLanding() {
-  const grid = document.getElementById('miniCardsGrid');
-  if (grid) {
-    CHARACTERS.slice(0, 24).forEach(char => {
-      const mini = document.createElement('div');
-      mini.className = 'mini-card';
-      mini.style.background = charBgColor(char);
-      mini.textContent = char.emoji;
-      grid.appendChild(mini);
-    });
-  }
-  gsap.to('#landingContent', {
-    opacity: 1,
-    y: 0,
-    duration: 1,
-    ease: 'power3.out',
-    delay: 0.3
-  });
-  gsap.fromTo('.mini-card',
-    { opacity: 0, scale: 0.5 },
-    { opacity: 1, scale: 1, duration: 0.4, stagger: 0.04, ease: 'back.out(1.2)', delay: 0.6 }
-  );
 }
